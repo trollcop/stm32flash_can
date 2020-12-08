@@ -30,4 +30,8 @@ uint32_t le_u32(const uint32_t v);
 
 void printStatus(FILE *fd, int condition);
 
+#ifdef _WIN32
+int usleep(uint32_t usec);
+#endif
+
 #endif

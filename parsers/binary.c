@@ -21,8 +21,17 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <stdint.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <stdlib.h>
+
+#ifdef _WIN32
+#include <io.h>
+typedef int ssize_t;
+#define __WIN32__
+#endif
 
 #include "binary.h"
 

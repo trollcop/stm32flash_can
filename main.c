@@ -25,7 +25,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <string.h>
 #include <signal.h>
 
@@ -38,6 +40,12 @@
 
 #include "parsers/binary.h"
 #include "parsers/hex.h"
+
+#ifdef _WIN32
+#define __WIN32__
+// include local copy of getopt
+#include "getopt.h"
+#endif
 
 #if defined(__WIN32__) || defined(__CYGWIN__)
 #include <windows.h>
@@ -560,7 +568,7 @@ int main(int argc, char* argv[]) {
 			}
 
 			if (verify) {
-				uint8_t compare[len];
+				uint8_t compare[STM32_MAX_TX_FRAME] = { 0, };
 				unsigned int offset, rlen;
 
 				offset = 0;

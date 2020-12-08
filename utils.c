@@ -50,3 +50,15 @@ void printStatus(FILE *fd, int condition){
 	else
 		fprintf(fd, "OK\n");
 }
+
+#ifdef _WIN32
+#define _WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+
+int usleep(uint32_t usec)
+{
+    Sleep(usec / 1000);
+
+    return 0;
+}
+#endif

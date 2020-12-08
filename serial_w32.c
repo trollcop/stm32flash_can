@@ -18,18 +18,23 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <windows.h>
 #include <ctype.h>
 
 #include "compiler.h"
 #include "serial.h"
 #include "port.h"
+#include "utils.h"
 
 struct serial {
 	HANDLE fd;
