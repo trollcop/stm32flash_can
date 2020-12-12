@@ -34,11 +34,14 @@
 #define STM32_ACK	0x79
 #define STM32_NACK	0x1F
 #define STM32_BUSY	0x76
+#define STM32_BYTE	0x04		/* CanBus ID used for sending Write Memory data */
 
 #define STM32_CMD_INIT	0x7F
+#define STM32_CMD_INIT_CANBUS	0x79
 #define STM32_CMD_GET	0x00	/* get the version and command supported */
 #define STM32_CMD_GVR	0x01	/* get version and read protection status */
 #define STM32_CMD_GID	0x02	/* get ID */
+#define STM32_CMD_SPEED	0x03	/* set Speed (CANBUS) */
 #define STM32_CMD_RM	0x11	/* read memory */
 #define STM32_CMD_GO	0x21	/* go */
 #define STM32_CMD_WM	0x31	/* write memory */
@@ -71,6 +74,7 @@ struct stm32_cmd {
 	uint8_t get;
 	uint8_t gvr;
 	uint8_t gid;
+	uint8_t spd; /* speed for CAN */
 	uint8_t rm;
 	uint8_t go;
 	uint8_t wm;
@@ -237,9 +241,13 @@ static stm32_err_t stm32_send_command_timeout(const stm32_t *stm,
 	port_err_t p_err;
 	uint8_t buf[2];
 
-	buf[0] = cmd;
-	buf[1] = cmd ^ 0xFF;
-	p_err = port->write(port, buf, 2);
+	if (port->flags & PORT_CANBUS) {
+		p_err = port->write(port, (void *)&cmd, 1);
+	} else {
+		buf[0] = cmd;
+		buf[1] = cmd ^ 0xFF;
+		p_err = port->write(port, buf, 2);
+	}
 	if (p_err != PORT_ERR_OK) {
 		fprintf(stderr, "Failed to send command\n");
 		return STM32_ERR_UNKNOWN;
@@ -289,6 +297,22 @@ static stm32_err_t stm32_resync(const stm32_t *stm)
 		time(&t1);
 	}
 	return STM32_ERR_UNKNOWN;
+}
+
+static stm32_err_t stm32_get_id_canbus(const stm32_t *stm, uint8_t *data, unsigned int len)
+{
+	struct port_interface *port = stm->port;
+	port_err_t p_err;
+
+	if (stm32_send_command(stm, stm->cmd->gid) != STM32_ERR_OK)
+		return STM32_ERR_UNKNOWN;
+
+	/* Read the device ID */
+	p_err = port->read(port, data, 2);
+	if (p_err != PORT_ERR_OK)
+		return STM32_ERR_UNKNOWN;
+
+	return STM32_ERR_OK;
 }
 
 /*
@@ -368,6 +392,9 @@ static stm32_err_t stm32_send_init_seq(const stm32_t *stm)
 	port_err_t p_err;
 	uint8_t byte, cmd = STM32_CMD_INIT;
 
+	if (port->flags & PORT_CANBUS)
+		cmd = STM32_CMD_INIT_CANBUS;
+
 	p_err = port->write(port, &cmd, 1);
 	if (p_err != PORT_ERR_OK) {
 		fprintf(stderr, "Failed to send init to device\n");
@@ -410,7 +437,7 @@ static stm32_err_t stm32_send_init_seq(const stm32_t *stm)
 
 stm32_t *stm32_init(struct port_interface *port, const char init)
 {
-	uint8_t len, val, buf[257];
+	uint8_t len, val, buf[257] = { 0, };
 	stm32_t *stm;
 	int i, new_cmds;
 
@@ -463,6 +490,8 @@ stm32_t *stm32_init(struct port_interface *port, const char init)
 			stm->cmd->gvr = val; break;
 		case STM32_CMD_GID:
 			stm->cmd->gid = val; break;
+		case STM32_CMD_SPEED:
+			stm->cmd->spd = val; break;
 		case STM32_CMD_RM:
 			stm->cmd->rm = val; break;
 		case STM32_CMD_GO:
@@ -519,22 +548,30 @@ stm32_t *stm32_init(struct port_interface *port, const char init)
 	}
 
 	/* get the device ID */
-	if (stm32_guess_len_cmd(stm, stm->cmd->gid, buf, 1) != STM32_ERR_OK) {
-		stm32_close(stm);
-		return NULL;
-	}
-	len = buf[0] + 1;
-	if (len < 2) {
-		stm32_close(stm);
-		fprintf(stderr, "Only %d bytes sent in the PID, unknown/unsupported device\n", len);
-		return NULL;
-	}
-	stm->pid = (buf[1] << 8) | buf[2];
-	if (len > 2) {
-		fprintf(stderr, "This bootloader returns %d extra bytes in PID:", len);
-		for (i = 2; i <= len ; i++)
-			fprintf(stderr, " %02x", buf[i]);
-		fprintf(stderr, "\n");
+	if (port->flags & PORT_CANBUS) {
+		if (stm32_get_id_canbus(stm, buf, 2) != STM32_ERR_OK) {
+			stm32_close(stm);
+			return NULL;
+		}
+		stm->pid = (buf[0] << 8) | buf[1];
+	} else {
+		if (stm32_guess_len_cmd(stm, stm->cmd->gid, buf, 1) != STM32_ERR_OK) {
+			stm32_close(stm);
+			return NULL;
+		}
+		len = buf[0] + 1;
+		if (len < 2) {
+			stm32_close(stm);
+			fprintf(stderr, "Only %d bytes sent in the PID, unknown/unsupported device\n", len);
+			return NULL;
+		}
+		stm->pid = (buf[1] << 8) | buf[2];
+		if (len > 2) {
+			fprintf(stderr, "This bootloader returns %d extra bytes in PID:", len);
+			for (i = 2; i <= len ; i++)
+				fprintf(stderr, " %02x", buf[i]);
+			fprintf(stderr, "\n");
+		}
 	}
 	if (stm32_get_ack(stm) != STM32_ERR_OK) {
 		stm32_close(stm);
@@ -565,7 +602,7 @@ stm32_err_t stm32_read_memory(const stm32_t *stm, uint32_t address,
 			      uint8_t data[], unsigned int len)
 {
 	struct port_interface *port = stm->port;
-	uint8_t buf[5];
+	uint8_t buf[6] = { 0, };
 
 	if (!len)
 		return STM32_ERR_OK;
@@ -578,6 +615,28 @@ stm32_err_t stm32_read_memory(const stm32_t *stm, uint32_t address,
 	if (stm->cmd->rm == STM32_CMD_ERR) {
 		fprintf(stderr, "Error: READ command not implemented in bootloader.\n");
 		return STM32_ERR_NO_CMD;
+	}
+
+	if (port->flags & PORT_CANBUS) {
+		buf[0] = stm->cmd->rm; /* Read Memory command */
+		buf[1] = address >> 24;
+		buf[2] = (address >> 16) & 0xFF;
+		buf[3] = (address >> 8) & 0xFF;
+		buf[4] = address & 0xFF;
+		buf[5] = len - 1;
+
+		if (port->write(port, buf, 6) != PORT_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+		if (stm32_get_ack(stm) != STM32_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+
+		if (port->read(port, data, len) != PORT_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+
+		if (stm32_get_ack(stm) != STM32_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+
+		return STM32_ERR_OK;
 	}
 
 	if (stm32_send_command(stm, stm->cmd->rm) != STM32_ERR_OK)
@@ -606,15 +665,16 @@ stm32_err_t stm32_write_memory(const stm32_t *stm, uint32_t address,
 			       const uint8_t data[], unsigned int len)
 {
 	struct port_interface *port = stm->port;
-	uint8_t cs, buf[256 + 2];
+	uint8_t cs, buf[256 + 2] = { 0, };
 	unsigned int i, aligned_len;
+	uint32_t remaining_len, w;
 	stm32_err_t s_err;
 
 	if (!len)
 		return STM32_ERR_OK;
 
 	if (len > 256) {
-		fprintf(stderr, "Error: READ length limit at 256 bytes\n");
+		fprintf(stderr, "Error: WRITE length limit at 256 bytes\n");
 		return STM32_ERR_UNKNOWN;
 	}
 
@@ -627,6 +687,42 @@ stm32_err_t stm32_write_memory(const stm32_t *stm, uint32_t address,
 	if (stm->cmd->wm == STM32_CMD_ERR) {
 		fprintf(stderr, "Error: WRITE command not implemented in bootloader.\n");
 		return STM32_ERR_NO_CMD;
+	}
+
+	if (port->flags & PORT_CANBUS) {
+		/* send command and address */
+		buf[0] = stm->cmd->wm;
+		buf[1] = address >> 24;
+		buf[2] = (address >> 16) & 0xFF;
+		buf[3] = (address >> 8) & 0xFF;
+		buf[4] = address & 0xFF;
+		buf[5] = len - 1;
+
+		if (port->write(port, buf, 6) != PORT_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+		if (stm32_get_ack(stm) != STM32_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+
+		/* Send 8-byte data frames up to len size */
+		remaining_len = len;
+		for (i = 0; i < len; i += 8) {
+			buf[0] = STM32_BYTE; /* ID per AN3154 */
+			w = remaining_len > 8 ? 8 : remaining_len;
+			memcpy(&buf[1], &data[i], w);
+			if (port->write(port, buf, w + 1) != PORT_ERR_OK)
+				return STM32_ERR_UNKNOWN;
+			if (stm32_get_ack(stm) != STM32_ERR_OK)
+				return STM32_ERR_UNKNOWN;
+
+			remaining_len -= w;
+		}
+
+		/* Get final ack */
+		s_err = stm32_get_ack_timeout(stm, STM32_BLKWRITE_TIMEOUT);
+		if (s_err != STM32_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+
+		return s_err;
 	}
 
 	/* send the address and checksum */
@@ -783,6 +879,32 @@ static stm32_err_t stm32_mass_erase(const stm32_t *stm)
 	stm32_err_t s_err;
 	uint8_t buf[3];
 
+	if (port->flags & PORT_CANBUS) {
+		/* Don't support stuff CAN BL doesn't support */
+		if (stm->cmd->er != STM32_CMD_ER)
+			return STM32_ERR_NO_CMD;
+
+		/* regular erase (0x43) */
+		buf[0] = stm->cmd->er;
+		buf[1] = 0xFF; /* All pages */
+
+		if (port->write(port, buf, 2) != STM32_ERR_OK) {
+			fprintf(stderr, "Mass erase error.\n");
+			return STM32_ERR_UNKNOWN;
+		}
+		/* Wait for mass erase ack */
+		if (stm32_get_ack(stm) != STM32_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+
+		s_err = stm32_get_ack_timeout(stm, STM32_MASSERASE_TIMEOUT);
+		if (s_err != STM32_ERR_OK) {
+			fprintf(stderr, "Mass erase failed. Try specifying the number of pages to be erased.\n");
+			return STM32_ERR_UNKNOWN;
+		}
+
+		return STM32_ERR_OK;
+	}
+
 	if (stm32_send_command(stm, stm->cmd->er) != STM32_ERR_OK) {
 		fprintf(stderr, "Can't initiate chip mass erase!\n");
 		return STM32_ERR_UNKNOWN;
@@ -828,6 +950,55 @@ static stm32_err_t stm32_pages_erase(const stm32_t *stm, uint32_t spage, uint32_
 	uint8_t cs = 0;
 	uint8_t *buf;
 	int i = 0;
+
+	if (port->flags & PORT_CANBUS) {
+		uint8_t buf[9] = { 0, };
+
+		/* The erase command reported by the bootloader is 0x43 for CANBUS */
+		if (stm->cmd->er != STM32_CMD_ER)
+			return STM32_ERR_NO_CMD;
+
+		/* regular erase (0x43) */
+		buf[0] = stm->cmd->er;
+		buf[1] = (uint8_t)pages;	/* Number of pages to erase */
+
+		if (port->write(port, buf, 2) != PORT_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+		if (stm32_get_ack(stm) != STM32_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+
+		buf[0] = stm->cmd->er;
+		i = 1;
+		for (pg_num = spage; pg_num < (pages + spage); pg_num++) {
+			buf[i++] = pg_num;
+			if (i > 8) {
+				// commit this batch of pages
+				if (port->write(port, buf, 9) != PORT_ERR_OK) {
+					fprintf(stderr, "Erase failed.\n");
+					return STM32_ERR_UNKNOWN;
+				}
+				if (stm32_get_ack(stm) != STM32_ERR_OK)
+					return STM32_ERR_UNKNOWN;
+
+				i = 1;
+			}
+		}
+		if (i != 1) {
+			// commit last batch of pages
+			if (port->write(port, buf, i) != PORT_ERR_OK) {
+				fprintf(stderr, "Erase failed.\n");
+				return STM32_ERR_UNKNOWN;
+			}
+			if (stm32_get_ack(stm) != STM32_ERR_OK)
+				return STM32_ERR_UNKNOWN;
+		}
+
+		s_err = stm32_get_ack_timeout(stm, pages * STM32_PAGEERASE_TIMEOUT);
+		if (s_err != STM32_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+
+		return STM32_ERR_OK;
+	}
 
 	/* The erase command reported by the bootloader is either 0x43, 0x44 or 0x45 */
 	/* 0x44 is Extended Erase, a 2 byte based protocol and needs to be handled differently. */
@@ -940,6 +1111,7 @@ stm32_err_t stm32_erase_memory(const stm32_t *stm, uint32_t spage, uint32_t page
 	/*
 	 * Some device, like STM32L152, cannot erase more than 512 pages in
 	 * one command. Split the call.
+	 * TODO: CANBUS cannot erase more than 254 in one command.
 	 */
 	while (pages) {
 		n = (pages <= 512) ? pages : 512;
@@ -1004,14 +1176,24 @@ stm32_err_t stm32_go(const stm32_t *stm, uint32_t address)
 		return STM32_ERR_NO_CMD;
 	}
 
-	if (stm32_send_command(stm, stm->cmd->go) != STM32_ERR_OK)
-		return STM32_ERR_UNKNOWN;
+	if (!(port->flags & PORT_CANBUS)) {
+		if (stm32_send_command(stm, stm->cmd->go) != STM32_ERR_OK)
+			return STM32_ERR_UNKNOWN;
+	}
 
 	buf[0] = address >> 24;
 	buf[1] = (address >> 16) & 0xFF;
 	buf[2] = (address >> 8) & 0xFF;
 	buf[3] = address & 0xFF;
 	buf[4] = buf[0] ^ buf[1] ^ buf[2] ^ buf[3];
+
+	if (port->flags & PORT_CANBUS) {
+		buf[4] = buf[3];
+		buf[3] = buf[2];
+		buf[2] = buf[1];
+		buf[1] = buf[0];
+		buf[0] = stm->cmd->go;
+	}
 	if (port->write(port, buf, 5) != PORT_ERR_OK)
 		return STM32_ERR_UNKNOWN;
 
