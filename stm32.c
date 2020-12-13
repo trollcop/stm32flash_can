@@ -960,7 +960,7 @@ static stm32_err_t stm32_pages_erase(const stm32_t *stm, uint32_t spage, uint32_
 
 		/* regular erase (0x43) */
 		buf[0] = stm->cmd->er;
-		buf[1] = (uint8_t)pages;	/* Number of pages to erase */
+		buf[1] = (uint8_t)pages - 1;	/* Number of pages to erase - 1 */
 
 		if (port->write(port, buf, 2) != PORT_ERR_OK)
 			return STM32_ERR_UNKNOWN;
